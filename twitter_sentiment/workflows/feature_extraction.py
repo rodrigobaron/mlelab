@@ -1,15 +1,9 @@
-from flytekit import task, workflow
-
-
-@task
-def say_hello() -> str:
-    return "hello world"
-
+from flytekit import workflow
 
 @workflow
 def my_wf() -> str:
-    res = say_hello()
-    return res
+    bucket_name = create_bucket(bucket_name='feature_store')
+
 
 
 if __name__ == "__main__":

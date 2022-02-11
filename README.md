@@ -1,3 +1,3 @@
-# Machine Learning Engineer LAB Projects
+# Machine Learning Engineering Projects
 
 Nothing there yet..
