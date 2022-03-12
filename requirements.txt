@@ -1,5 +1,0 @@
-flytekit>=0.20.0
-kaggle
-boto3
-nltk
-sklearn
