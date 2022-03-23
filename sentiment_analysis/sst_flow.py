@@ -1,4 +1,4 @@
-from metaflow import conda_base, FlowSpec, IncludeFile, Parameter, step
+from metaflow import conda_base, FlowSpec, IncludeFile, Parameter, step, S3
 
 
 def script_path(filename):
@@ -14,12 +14,15 @@ def script_path(filename):
 
 
 def evaluate(model, val_loader, criterion, device):
+    import torch
+    from tqdm import tqdm
+    from utils import get_accuracy_from_logits, read_yaml
+
+    
     model.eval()
     batch_accuracy_summation, loss, num_batches = 0, 0, 0
     with torch.no_grad():
-        for input_ids, attention_mask, labels in tqdm(
-            val_loader, desc="Evaluating"
-        ):
+        for input_ids, attention_mask, labels in tqdm(val_loader, desc="Evaluating"):
             input_ids, attention_mask, labels = (
                 input_ids.to(device),
                 attention_mask.to(device),
@@ -34,6 +37,9 @@ def evaluate(model, val_loader, criterion, device):
 
 
 def train(model, train_loader, optimizer, criterion, device):
+    import torch
+    from tqdm import tqdm
+    
     model.train()
     for input_ids, attention_mask, labels in tqdm(
         iterable=train_loader, desc="Training"
@@ -50,112 +56,153 @@ def train(model, train_loader, optimizer, criterion, device):
         optimizer.step()
 
 
-@conda_base(python='3.8.10', libraries={'pandas': '1.3.4',
-                                        'transformers': '4.12.3',
-                                        'torch': '1.10.1'})
+@conda_base(
+    python="3.8.10",
+    libraries={"pandas": "1.3.4", "transformers": "4.12.3", "pytorch-gpu": "1.10.1", "pyyaml": "6.0.0"},
+)
 class SSTFlow(FlowSpec):
     """
     Stanford Sentiment Treebank model training, fine-tuned [BERT, ALBERT, DistilBERT].
     """
 
-    config_file = Parameter('config-file',
-                            help='Configuration file for experiment',
-                            default='bert.yaml')
-    
-    train_fname = IncludeFile(
-        "fname",
-        help="The path to sst train file.",
-        default=script_path("data/train.tsv"),
+    config_file = Parameter(
+        "config-file", help="Configuration file for experiment", default="config/bert-sst.yaml"
     )
 
-    val_fname = IncludeFile(
-        "fname",
-        help="The path to sst val file.",
-        default=script_path("data/dev.tsv"),
+    train_fname = Parameter(
+        "train-path", help="The path to sst train file", default="data/sst/train.tsv"
     )
+
+    val_fname = Parameter(
+        "val-path", help="The path to sst val file", default="data/sst/dev.tsv"
+    )
+    # train_fname = IncludeFile(
+    #     "train_fname",
+    #     help="The path to sst train file.",
+    #     default=script_path("data/sst/train.tsv"),
+    # )
+
+    # val_fname = IncludeFile(
+    #     "val_fname",
+    #     help="The path to sst val file.",
+    #     default=script_path("data/sst/dev.tsv"),
+    # )
 
     @step
     def start(self):
+        from utils import get_accuracy_from_logits, read_yaml
+
         self.experiment_config = read_yaml(self.config_file)
         self.next(self.load_dataset)
 
     @step
     def load_dataset(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(self.experiment_config.get('model_name_or_path'))
+        from torch.utils.data import DataLoader
+        from transformers import AutoTokenizer
+        from datasets.sst import SSTDataset
+
+        model_name_or_path = self.experiment_config.get("model_name_or_path")
+        maxlen_train = int(self.experiment_config.get("maxlen_train"))
+        maxlen_val = int(self.experiment_config.get("maxlen_val"))
+        batch_size = int(self.experiment_config.get("batch_size"))
+        num_threads = int(self.experiment_config.get("num_threads"))
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path
+        )
 
         train_set = SSTDataset(
-            filename=self.train_fname,
-            maxlen=self.experiment_config.get('maxlen_train'),
+            file_path=self.train_fname,
+            maxlen=maxlen_train,
             tokenizer=self.tokenizer,
         )
+        print('loaded train_set')
         val_set = SSTDataset(
-            filename=self.val_fname, maxlen=self.experiment_config.get('maxlen_val'), tokenizer=self.tokenizer
+            file_path=self.val_fname,
+            maxlen=maxlen_val,
+            tokenizer=self.tokenizer,
         )
+        print('loaded val_set')
 
         self.train_loader = DataLoader(
-            dataset=train_set, batch_size=self.experiment_config.get('batch_size'), num_workers=self.experiment_config.get('num_threads')
+            dataset=train_set,
+            batch_size=batch_size,
+            num_workers=num_threads,
         )
         self.val_loader = DataLoader(
-            dataset=val_set, batch_size=self.experiment_config.get('batch_size'), num_workers=self.experiment_config.get('num_threads')
+            dataset=val_set,
+            batch_size=batch_size,
+            num_workers=num_threads,
         )
         self.next(self.train)
-    
+
     @step
     def train(self):
         import torch
-        from transformers import AutoTokenizer, AutoConfig
-        from tqdm import tqdm
-
+        import torch.nn as nn
+        import torch.optim as optim
+        from tqdm import tqdm, trange
+        
         from modeling import (
             BertForSentimentClassification,
             AlbertForSentimentClassification,
             DistilBertForSentimentClassification,
         )
 
-        if self.experiment_config.get('model_type') == "bert":
+        model_type = self.experiment_config.get("model_type")
+        model_name_or_path = self.experiment_config.get("model_name_or_path")
+        lr = float(self.experiment_config.get("lr"))
+        num_eps = int(self.experiment_config.get("num_eps"))
+
+        if model_type == "bert":
             self.model = BertForSentimentClassification.from_pretrained(
-                self.experiment_config.get('model_name_or_path')
+                model_name_or_path
             )
-        elif elf.experiment_config.get('model_type') == "albert":
+        elif model_type == "albert":
             self.model = AlbertForSentimentClassification.from_pretrained(
-                self.experiment_config.get('model_name_or_path')
+                model_name_or_path
             )
-        elif elf.experiment_config.get('model_type') == "distilbert":
+        elif model_type == "distilbert":
             self.model = DistilBertForSentimentClassification.from_pretrained(
-                self.experiment_config.get('model_name_or_path')
+                model_name_or_path
             )
         else:
-            raise ValueError("This transformer model is not supported yet.")
+            raise ValueError(f'"{model_type}" transformer model is not supported yet.')
 
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.model = self.model.to(device)
         criterion = nn.BCEWithLogitsLoss()
-        optimizer = optim.Adam(params=self.model.parameters(), lr=self.experiment_config.get('lr'))
+        optimizer = optim.Adam(
+            params=self.model.parameters(), lr=lr
+        )
 
         best_accuracy = 0
-        for epoch in trange(args.num_eps, desc="Epoch"):
+        for epoch in trange(num_eps, desc="Epoch"):
             train(
-                model=self.model, train_loader=train_loader, optimizer=optimizer, criterion=criterion, device=device
+                model=self.model,
+                train_loader=self.train_loader,
+                optimizer=optimizer,
+                criterion=criterion,
+                device=device,
             )
             val_accuracy, val_loss = evaluate(
-                model=model, val_loader=val_loader, criterion=criterion, device=device
+                model=self.model, val_loader=self.val_loader, criterion=criterion, device=device
             )
             print(
                 f"Epoch {epoch} complete! Validation Accuracy : {val_accuracy}, Validation Loss : {val_loss}"
             )
 
             if val_accuracy > best_accuracy:
-                best_accuracy = val_accuracy
                 print(
-                    f"Best validation accuracy improved from {best_accuracy} to {val_accuracy}, saving analyzer..."
+                    f"Best validation accuracy improved from {best_accuracy} to {val_accuracy} ..."
                 )
-                with S3(run=self) as s3:
-                    model_url = s3.put('best_val_acc_model', self.model)
-                    tokenizer_url = s3.put('best_val_acc_tokenizer', self.tokenizer)
+                best_accuracy = val_accuracy
         self.next(self.end)
 
     @step
     def end(self):
         print("model finished training!!")
+
 
 if __name__ == "__main__":
     SSTFlow()
