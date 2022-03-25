@@ -76,17 +76,6 @@ class SSTFlow(FlowSpec):
     val_fname = Parameter(
         "val-path", help="The path to sst val file", default="data/sst/dev.tsv"
     )
-    # train_fname = IncludeFile(
-    #     "train_fname",
-    #     help="The path to sst train file.",
-    #     default=script_path("data/sst/train.tsv"),
-    # )
-
-    # val_fname = IncludeFile(
-    #     "val_fname",
-    #     help="The path to sst val file.",
-    #     default=script_path("data/sst/dev.tsv"),
-    # )
 
     @step
     def start(self):
@@ -96,7 +85,7 @@ class SSTFlow(FlowSpec):
         self.next(self.load_dataset)
 
     @step
-    def load_dataset(self):
+    def load_data(self):
         from torch.utils.data import DataLoader
         from transformers import AutoTokenizer
         from datasets.sst import SSTDataset
@@ -111,29 +100,45 @@ class SSTFlow(FlowSpec):
             model_name_or_path
         )
 
-        train_set = SSTDataset(
+        self.train_set = SSTDataset(
             file_path=self.train_fname,
             maxlen=maxlen_train,
             tokenizer=self.tokenizer,
         )
-        print('loaded train_set')
-        val_set = SSTDataset(
+        self.val_set = SSTDataset(
             file_path=self.val_fname,
             maxlen=maxlen_val,
             tokenizer=self.tokenizer,
         )
-        print('loaded val_set')
 
         self.train_loader = DataLoader(
-            dataset=train_set,
+            dataset=self.train_set,
             batch_size=batch_size,
             num_workers=num_threads,
+            shuffle=True
         )
         self.val_loader = DataLoader(
-            dataset=val_set,
+            dataset=self.val_set,
             batch_size=batch_size,
             num_workers=num_threads,
         )
+        self.next(self.show_data)
+
+    @step
+    def show_data(self):
+        tmp_train_iter = iter(self.train_set)
+        tmp_val_iter = iter(self.val_set)
+        
+        train_batch = [next(tmp_train_iter), next(tmp_train_iter)]
+        val_batch = [next(tmp_val_iter), next(tmp_val_iter)]
+
+        self.debug_info = {
+            "samples": {
+                "train": train_batch,
+                "val": val_batch
+            }
+        }
+
         self.next(self.train)
 
     @step
@@ -197,6 +202,28 @@ class SSTFlow(FlowSpec):
                     f"Best validation accuracy improved from {best_accuracy} to {val_accuracy} ..."
                 )
                 best_accuracy = val_accuracy
+        self.next(self.show_model_output)
+    
+    def show_model_output(self):
+        tmp_train_iter = iter(self.train_set)
+        tmp_val_iter = iter(self.val_set)
+        
+        train_batch = [next(tmp_train_iter), next(tmp_train_iter)]
+        val_batch = [next(tmp_val_iter), next(tmp_val_iter)]
+
+        train_output = self.model(train_batch)
+        val_output = self.model(val_batch)
+
+        self.debug_info = {
+            "samples": {
+                "train": train_batch,
+                "val": val_batch
+            },
+            "outputs": {
+                "train": train_output,
+                "val": val_output
+            }
+        }
         self.next(self.end)
 
     @step
