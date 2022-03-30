@@ -1,0 +1,8 @@
+model_type: bert
+model_name_or_path: bert-base-uncased
+maxlen_train: 30
+maxlen_val: 50
+batch_size: 32
+num_threads: 1
+lr: 2e-5
+num_eps: 2

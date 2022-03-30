@@ -131,10 +131,8 @@ dmypy.json
 # IDE
 .idea/*
 
-# Flyte serialization artifacts
-_pb_output
-_pb_output/*
+# Metaflow
+.metaflow
 
-flyte-package.tgz
 
 env.sh
